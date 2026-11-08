@@ -1,0 +1,78 @@
+name: Build Ultra-Optimized Scrcpy APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-optimized:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1. Checkout mã nguồn (kèm submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 2. Cài đặt JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: 3. Xóa các kiến trúc thừa & Strip thẳng vào libadb.so
+        run: |
+          # Xóa các thư mục kiến trúc 32-bit và x86 không dùng đến
+          rm -rf app/src/main/jniLibs/armeabi-v7a
+          rm -rf app/src/main/jniLibs/x86
+          rm -rf app/src/main/jniLibs/x86_64
+          
+          # Dùng llvm-strip của Android NDK cắt bỏ toàn bộ debug symbols trong libadb.so
+          STRIP_TOOL=$(find $ANDROID_HOME/ndk -name "llvm-strip" | sort -V | tail -n 1)
+          if [ -n "$STRIP_TOOL" ] && [ -f "app/src/main/jniLibs/arm64-v8a/libadb.so" ]; then
+            echo "Stripping libadb.so with $STRIP_TOOL..."
+            "$STRIP_TOOL" --strip-all app/src/main/jniLibs/arm64-v8a/libadb.so
+          fi
+
+      - name: 4. Thêm quy tắc R8 / ProGuard tối ưu hóa
+        run: |
+          cat << 'EOF' >> app/proguard-rules.pro
+          -optimizationpasses 5
+          -allowaccessmodification
+          -assumenosideeffects class android.util.Log {
+              public static int v(...);
+              public static int d(...);
+              public static int i(...);
+          }
+          -keep class org.client.scrcpy.** { *; }
+          -keep class * extends android.os.IInterface { *; }
+          EOF
+
+      - name: 5. Biên dịch bản Release và Ký APK (V2/V3 Signature)
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease
+
+          # Tạo keystore tự ký và align + sign APK để cài đặt trực tiếp
+          keytool -genkey -v -keystore release.keystore -alias scrcpy_opt \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass 123456 -keypass 123456 \
+            -dname "CN=ScrcpyOpt, OU=Dev, O=Opt, L=VN, S=VN, C=VN"
+
+          BUILD_TOOLS=$(ls $ANDROID_HOME/build-tools | sort -V | tail -n 1)
+          UNSIGNED_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+
+          $ANDROID_HOME/build-tools/$BUILD_TOOLS/zipalign -v -p 4 "$UNSIGNED_APK" aligned.apk
+          $ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner sign \
+            --ks release.keystore \
+            --ks-pass pass:123456 \
+            --key-pass pass:123456 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out ScrcpyForAndroid-arm64-UltraOpt.apk aligned.apk
+
+      - name: 6. Xuất file APK hoàn chỉnh
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScrcpyForAndroid-Ultra-Optimized-APK
+          path: ScrcpyForAndroid-arm64-UltraOpt.apk
