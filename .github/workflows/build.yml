@@ -1,0 +1,86 @@
+name: Build Rust 32-bit Remote Touch
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch: # Cho phép bấm nút Build thủ công trên GitHub
+
+jobs:
+  build:
+    name: Build for ${{ matrix.target }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 1. Android ARM 32-bit (armeabi-v7a)
+          - target: armv7-linux-androideabi
+            os: ubuntu-latest
+            artifact_name: remote-touch-android-armv7
+
+          # 2. Linux ARM 32-bit (Raspberry Pi 2/3, Embedded Linux hard-float)
+          - target: armv7-unknown-linux-gnueabihf
+            os: ubuntu-latest
+            artifact_name: remote-touch-linux-armv7
+
+          # 3. Windows 32-bit (x86)
+          - target: i686-pc-windows-gnu
+            os: ubuntu-latest
+            artifact_name: remote-touch-win32.exe
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # Cài đặt Rust toolchain với phiên bản ổn định
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Cài đặt linker chéo (cross-linker) cho Linux armhf và Windows i686 trên môi trường Ubuntu runner
+      - name: Install system cross-compilation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf gcc-i686-linux-gnu
+
+      # Cấu hình linker trong Cargo để build chéo thành công
+      - name: Configure Cargo Linker
+        shell: bash
+        run: |
+          mkdir -p .cargo
+          cat << EOF > .cargo/config.toml
+          [target.armv7-unknown-linux-gnueabihf]
+          linker = "arm-linux-gnueabihf-gcc"
+
+          [target.i686-pc-windows-gnu]
+          linker = "i686-w64-mingw32-gcc"
+          EOF
+          
+          # Nếu build cho Windows x86, cần cài đặt mingw-w64
+          if [ "${{ matrix.target }}" = "i686-pc-windows-gnu" ]; then
+            sudo apt-get install -y mingw-w64
+          fi
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # Chuẩn bị file output để gom artifact
+      - name: Prepare artifact directory
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ "${{ matrix.target }}" = "i686-pc-windows-gnu" ]; then
+            cp target/${{ matrix.target }}/release/*.exe dist/
+          else
+            cp target/${{ matrix.target }}/release/remote-touch-32 dist/ || cp target/${{ matrix.target }}/release/lib* dist/ || true
+          fi
+
+      - name: Upload compiled artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/
